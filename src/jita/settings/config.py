@@ -12,6 +12,10 @@ def find_project_root(start_path: Path, marker_file: str = "pyproject.toml") -> 
 BASE_DIR = find_project_root(Path(__file__))
 
 # Definición de rutas
+DATA = BASE_DIR / "datos"
+
+CASA_LEY_DATA = DATA / "casa_ley"
+
 VECTORS_DIR = BASE_DIR / "datos" / "vectorstores"
 PRODUCTS_VECTOR_PATH = VECTORS_DIR / "products_vector_store"
 SALES_PRODUCTS_VECTOR_PATH = VECTORS_DIR / "sales_products_vector_store"
@@ -21,5 +25,5 @@ ID_SUCURSAL = BASE_DIR / "datos" / "idSucursal.json"
 BASE_KNOWLEDGE = BASE_DIR / "datos" / "base_de_conocimientos"
 
 # 🔥 Crear directorios automáticamente
-for path in [VECTORS_DIR, PRODUCTS_VECTOR_PATH, SALES_PRODUCTS_VECTOR_PATH, BASE_KNOWLEDGE, SUPPORT_INFO_VECTOR_PATH]:
+for path in [DATA, CASA_LEY_DATA]:
     path.mkdir(parents=True, exist_ok=True)
