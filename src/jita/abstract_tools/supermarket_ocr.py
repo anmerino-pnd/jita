@@ -8,6 +8,7 @@ current_date = date.today().isoformat()
 class SupermarketOCRBase(ABC):
     @abstractmethod
     def extract_text(self, image_path: str) -> dict:
+        """With the help of a MultiModal model, extract the text from the image"""
         pass
 
     def system_prompt(self) -> str:
@@ -83,3 +84,7 @@ Ejemplo de Salida:
 }}
 """
         )
+    
+    def slicing_window(self, image_path: str, folder_path: str, window_height: int, overlap: int):
+        """If the image is too big, try slicing it"""
+        pass

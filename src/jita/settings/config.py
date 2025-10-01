@@ -14,6 +14,7 @@ BASE_DIR = find_project_root(Path(__file__))
 DATA = BASE_DIR / "datos"
 
 CASA_LEY_DATA = DATA / "casa_ley" / date.today().strftime("%B_%Y")
+WINDOWED_CASA_LEY = CASA_LEY_DATA / "windowed"
 
 VECTORS_DIR = BASE_DIR / "datos" / "vectorstores"
 PRODUCTS_VECTOR_PATH = VECTORS_DIR / "products_vector_store"
