@@ -1,4 +1,5 @@
 import os
+import cv2
 import math
 import ollama
 import numpy as np
@@ -63,3 +64,64 @@ class OllamaOCR(SupermarketOCRBase):
                 tiles.append(path_out)
 
         return tiles
+
+    def smart_crop(self, image_path, output_folder, min_area=5000):
+        os.makedirs(output_folder, exist_ok=True)
+        
+        img = cv2.imread(image_path)
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+        # 1. Binarización adaptativa
+        thresh = cv2.adaptiveThreshold(gray, 255,
+                                    cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                    cv2.THRESH_BINARY_INV, 25, 15)
+
+        # 2. Encontrar contornos
+        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        crops = []
+        for i, cnt in enumerate(contours):
+            x, y, w, h = cv2.boundingRect(cnt)
+
+            # 3. Filtrar contornos pequeños
+            if w * h > min_area:
+                crop = img[y:y+h, x:x+w]
+                out_path = os.path.join(output_folder, f"crop_{i}.png")
+                cv2.imwrite(out_path, crop)
+                crops.append((x, y, w, h, out_path))
+        
+        return crops
+        
+    def smart_crop_auto_area(self, image_path, output_folder, area_ratio=0.01):
+        """
+        Recorta automáticamente bloques de una imagen de folleto usando OpenCV.
+        `area_ratio` define el tamaño mínimo relativo del contorno respecto al área total.
+        """        
+        img = cv2.imread(image_path)
+        height, width = img.shape[:2]
+        total_area = width * height
+
+        # Calculamos min_area dinámicamente
+        min_area = total_area * area_ratio
+
+        # Convertir a gris y binarizar
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        thresh = cv2.adaptiveThreshold(
+            gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY_INV, 25, 15
+        )
+
+        # Encontrar contornos externos
+        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        crops = []
+        for i, cnt in enumerate(contours):
+            x, y, w, h = cv2.boundingRect(cnt)
+
+            if w * h >= min_area:
+                crop = img[y:y+h, x:x+w]
+                out_path = os.path.join(output_folder, f"crop_{i}.png")
+                cv2.imwrite(out_path, crop)
+                crops.append((x, y, w, h, out_path))
+        
+        return crops
