@@ -19,7 +19,7 @@ class OllamaOCR(SupermarketOCRBase):
               'role': 'system',
               'content': self.system_prompt,
               'role': 'user',
-              'content': "Analiza este folleto",
+              'content': "Analiza este folleto y extrae todos los productos",
               'images': [image_path]  # 👈 lista de rutas de imagen
           }
       ],
@@ -125,3 +125,93 @@ class OllamaOCR(SupermarketOCRBase):
                 crops.append((x, y, w, h, out_path))
         
         return crops
+
+    def _merge_rects(self, rects, threshold=50):
+        """
+        Helper function to merge overlapping or nearby rectangles.
+        """
+        while True:
+            merged_one = False
+            merged_rects = []
+            while rects:
+                r1 = rects.pop(0)
+                x1, y1, w1, h1 = r1
+                merged = False
+                # Iterate over remaining rects to check for merges
+                for i in range(len(rects) - 1, -1, -1):
+                    r2 = rects[i]
+                    x2, y2, w2, h2 = r2
+                    # Create expanded rect for proximity check
+                    exp_x1, exp_y1 = max(0, x1 - threshold), max(0, y1 - threshold)
+                    exp_w1, exp_h1 = w1 + 2 * threshold, h1 + 2 * threshold
+                    
+                    # Check for intersection between expanded r1 and r2
+                    if not (exp_x1 > x2 + w2 or exp_x1 + exp_w1 < x2 or exp_y1 > y2 + h2 or exp_y1 + exp_h1 < y2):
+                        # Merge them
+                        min_x = min(x1, x2)
+                        min_y = min(y1, y2)
+                        max_x = max(x1 + w1, x2 + w2)
+                        max_y = max(y1 + h1, y2 + h2)
+                        merged_rects.append((min_x, min_y, max_x - min_x, max_y - min_y))
+                        rects.pop(i)
+                        merged = True
+                        merged_one = True
+                        break # r1 is merged, break inner loop
+                if not merged:
+                    merged_rects.append(r1)
+            rects = merged_rects
+            if not merged_one:
+                break
+        return rects
+    
+    def crop_by_zones(self, image_path, output_folder, min_area_ratio=0.005, padding=15):
+        """
+        Intelligently finds and crops logical zones from a flyer image.
+        """
+        os.makedirs(output_folder, exist_ok=True)
+        
+        # 1. Pre-processing
+        img = cv2.imread(image_path)
+        original_img = img.copy() # Keep a color copy for the final crop
+        total_area = img.shape[0] * img.shape[1]
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        # Blur to reduce noise and help merge nearby elements
+        blurred = cv2.GaussianBlur(gray, (7, 7), 0)
+        # Adaptive thresholding is great for uneven lighting
+        thresh = cv2.adaptiveThreshold(blurred, 255, 
+                                       cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                                       cv2.THRESH_BINARY_INV, 11, 4)
+
+        # 2. Contour Detection
+        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        # 3. Filtering and Grouping
+        initial_rects = []
+        for cnt in contours:
+            x, y, w, h = cv2.boundingRect(cnt)
+            # Filter out very small contours (noise)
+            if w * h > total_area * min_area_ratio:
+                initial_rects.append((x, y, w, h))
+
+        # The magic step: merge nearby rectangles into logical zones
+        merged_zones = self._merge_rects(initial_rects)
+
+        # 4. Cropping and Saving
+        cropped_images_paths = []
+        for i, (x, y, w, h) in enumerate(merged_zones):
+            # Add some padding to the crop
+            x_pad = max(0, x - padding)
+            y_pad = max(0, y - padding)
+            w_pad = min(img.shape[1], x + w + padding) - x_pad
+            h_pad = min(img.shape[0], y + h + padding) - y_pad
+
+            # Crop from the original color image
+            crop = original_img[y_pad:y_pad+h_pad, x_pad:x_pad+w_pad]
+            
+            # Save the cropped image
+            out_path = os.path.join(output_folder, f"zone_{i+1:02d}.jpg")
+            cv2.imwrite(out_path, crop)
+            cropped_images_paths.append(out_path)
+            
+        print(f"Successfully cropped {len(cropped_images_paths)} zones.")
+        return cropped_images_paths
