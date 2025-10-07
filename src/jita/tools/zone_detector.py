@@ -3,248 +3,295 @@ import cv2
 import numpy as np
 from PIL import Image, ImageEnhance
 
-class HierarchicalFlyerDetector:
+class SmartFlyerDetector:
     """
-    Detector jerárquico optimizado para folletos de supermercado.
-    Detecta columnas principales y las subdivide horizontalmente con padding inteligente.
+    Detector híbrido que usa CLAHE + detección de espacios blancos
+    para recortar folletos de supermercado de forma inteligente.
     """
     
     def __init__(self, 
-                 primary_divisions='auto',
-                 subdivisions=3,
-                 padding_percent=5,
-                 preprocessing='balanced'):
+                 method='whitespace',
+                 min_zone_height_percent=5,
+                 min_zone_width_percent=15,
+                 padding_percent=3,
+                 whitespace_threshold=240):
         """
         Args:
-            primary_divisions: 'auto' o número fijo (2, 3, etc.)
-            subdivisions: Cuántas zonas crear dentro de cada columna
-            padding_percent: Porcentaje de padding arriba/abajo (0-20 recomendado)
-            preprocessing: 'gentle', 'balanced', 'aggressive'
+            method: 'whitespace' (detecta espacios blancos) o 'hierarchical' (columnas+subdivisiones)
+            min_zone_height_percent: Altura mínima de zona (% de altura total)
+            min_zone_width_percent: Ancho mínimo de zona (% de ancho total)
+            padding_percent: Padding arriba/abajo (%)
+            whitespace_threshold: Umbral para considerar "blanco" (0-255)
         """
-        self.primary_divisions = primary_divisions
-        self.subdivisions = subdivisions
+        self.method = method
+        self.min_zone_height_percent = min_zone_height_percent
+        self.min_zone_width_percent = min_zone_width_percent
         self.padding_percent = padding_percent
-        self.preprocessing_preset = preprocessing
-    
+        self.whitespace_threshold = whitespace_threshold
+
     def detect_zones(self, image_path, output_folder, debug=False):
         """
-        Detecta y recorta zonas con padding inteligente.
-        
-        Returns:
-            Lista de diccionarios con info de cada zona
-        """
+        Detecta zonas usando el método configurado o el modo automático.
+        """        
         os.makedirs(output_folder, exist_ok=True)
-        
         img = cv2.imread(image_path)
+        if img is None:
+            raise FileNotFoundError(f"No se pudo cargar: {image_path}")
+        
         h, w = img.shape[:2]
+        print(f"📸 Imagen cargada: {w}x{h}px")
         
-        # Preprocesamiento
-        gray = self._preprocess_image(img)
+        # --- NUEVO: MODO AUTOMÁTICO ---
+        if self.method == 'auto':
+            print("\n🤖 Modo automático: evaluando mejor estrategia...")
+            zones_whitespace = self._detect_by_whitespace(img, output_folder, debug=False)
+            zones_hierarchical = self._detect_hierarchical(img, output_folder, debug=False)
+            
+            count_ws = len(zones_whitespace)
+            count_hier = len(zones_hierarchical)
+            
+            print(f"   → whitespace: {count_ws} zonas")
+            print(f"   → hierarchical: {count_hier} zonas")
+
+            # Decisión inteligente:
+            target_range = range(3, 7)
+            best_method = None
+
+            if count_ws in target_range and count_hier not in target_range:
+                best_method = 'whitespace'
+            elif count_hier in target_range and count_ws not in target_range:
+                best_method = 'hierarchical'
+            elif count_ws in target_range and count_hier in target_range:
+                best_method = 'hierarchical' if abs(count_hier - 5) < abs(count_ws - 5) else 'whitespace'
+            else:
+                # Si ninguno cae en el rango, elegir el que más se acerque a 4-5
+                best_method = 'hierarchical' if abs(count_hier - 5) < abs(count_ws - 5) else 'whitespace'
+
+            print(f"✅ Método elegido: {best_method.upper()}")
+            zones = zones_hierarchical if best_method == 'hierarchical' else zones_whitespace
+        
+        # --- Modos normales ---
+        elif self.method == 'whitespace':
+            zones = self._detect_by_whitespace(img, output_folder, debug)
+        elif self.method == 'hierarchical':
+            zones = self._detect_hierarchical(img, output_folder, debug)
+        else:
+            raise ValueError(f"Método desconocido: {self.method}")
+        
+        # --- Aplicar padding y recortar ---
+        final_zones = self._apply_padding_and_crop(img, zones, output_folder, debug)
+        
+        print(f"\n✅ Total: {len(final_zones)} zonas detectadas y guardadas")
+        return final_zones
+
+    
+    # def detect_zones(self, image_path, output_folder, debug=False):
+    #     """
+    #     Detecta zonas usando el método configurado.
+    #     """        
+    #     os.makedirs(output_folder, exist_ok=True)
+    #     img = cv2.imread(image_path)
+    #     if img is None:
+    #         raise FileNotFoundError(f"No se pudo cargar: {image_path}")
+        
+    #     h, w = img.shape[:2]
+    #     print(f"📸 Imagen cargada: {w}x{h}px")
+        
+    #     if self.method == 'whitespace':
+    #         zones = self._detect_by_whitespace(img, output_folder, debug)
+    #     elif self.method == 'hierarchical':
+    #         zones = self._detect_hierarchical(img, output_folder, debug)
+    #     else:
+    #         raise ValueError(f"Método desconocido: {self.method}")
+        
+    #     # Aplicar padding y recortar
+    #     final_zones = self._apply_padding_and_crop(img, zones, output_folder, debug)
+        
+    #     print(f"\n✅ Total: {len(final_zones)} zonas detectadas y guardadas")
+    #     return final_zones
+    
+    def _detect_by_whitespace(self, img, output_folder, debug):
+        """
+        Detecta zonas basándose en espacios blancos horizontales.
+        Perfecto para folletos con separadores blancos naturales.
+        """
+        h, w = img.shape[:2]
+        print(f"\n🔍 Método: Detección por espacios blancos...")
+        
+        # === PREPROCESAMIENTO AVANZADO ===
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        
+        # CLAHE para mejorar contraste
+        clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
+        enhanced = clahe.apply(gray)
+        
+        # Filtro bilateral para preservar bordes
+        bilateral = cv2.bilateralFilter(enhanced, 9, 75, 75)
         
         if debug:
-            cv2.imwrite(os.path.join(output_folder, "0_preprocessed.jpg"), gray)
-            print(f"📸 Imagen preprocesada: {w}x{h}px")
+            cv2.imwrite(os.path.join(output_folder, "1_preprocessed_clahe.jpg"), enhanced)
+            cv2.imwrite(os.path.join(output_folder, "1_preprocessed_bilateral.jpg"), bilateral)
         
-        # NIVEL 1: Detectar divisiones principales (columnas)
-        print(f"\n🔍 Detectando divisiones principales...")
-        primary_zones = self._detect_primary_divisions(img, gray, debug, output_folder)
-        print(f"   ✓ {len(primary_zones)} columnas detectadas")
+        # === DETECCIÓN DE ESPACIOS BLANCOS ===
+        # Proyección horizontal: contar píxeles blancos por fila
+        white_threshold = self.whitespace_threshold
+        h_projection = np.sum(bilateral > white_threshold, axis=1) / w * 100  # % de blancos
         
-        # NIVEL 2: Subdividir cada columna con padding
-        print(f"\n🔍 Subdividiendo en {self.subdivisions} zonas c/u (padding: {self.padding_percent}%)...")
+        if debug:
+            self._save_projection_plot(h_projection, output_folder, 
+                                      "Detección de Espacios Blancos Horizontales",
+                                      threshold=70)
+        
+        # Encontrar filas que son mayormente blancas (>70% blanco)
+        whitespace_rows = h_projection > 70
+        
+        # Detectar bloques continuos de contenido
+        content_blocks = []
+        in_content = False
+        block_start = 0
+        
+        for i, is_white in enumerate(whitespace_rows):
+            if not is_white and not in_content:
+                # Inicio de bloque de contenido
+                block_start = i
+                in_content = True
+            elif is_white and in_content:
+                # Fin de bloque de contenido
+                block_end = i
+                block_height = block_end - block_start
+                
+                # Filtrar bloques muy pequeños
+                if block_height > h * (self.min_zone_height_percent / 100):
+                    content_blocks.append((0, block_start, w, block_height))
+                
+                in_content = False
+        
+        # No olvidar el último bloque si llega hasta el final
+        if in_content:
+            block_height = h - block_start
+            if block_height > h * (self.min_zone_height_percent / 100):
+                content_blocks.append((0, block_start, w, block_height))
+        
+        print(f"   ✓ {len(content_blocks)} bloques de contenido detectados")
+        
+        # Si no se detectaron bloques, subdividir cada bloque verticalmente
+        if len(content_blocks) < 2:
+            print("   ⚠️ Pocos bloques horizontales, aplicando subdivisión vertical...")
+            zones = self._subdivide_blocks_vertically(img, content_blocks)
+        else:
+            zones = content_blocks
+        
+        return zones
+    
+    def _subdivide_blocks_vertically(self, img, blocks):
+        """
+        Subdivide bloques grandes verticalmente (detecta columnas).
+        """
+        h, w = img.shape[:2]
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        
         all_zones = []
-        zone_counter = 1
         
-        for col_idx, (px, py, pw, ph) in enumerate(primary_zones):
-            print(f"   → Columna {col_idx + 1}: procesando...")
+        for block_x, block_y, block_w, block_h in blocks:
+            # Extraer región del bloque
+            block_region = gray[block_y:block_y+block_h, block_x:block_x+block_w]
             
-            # Extraer región de la columna
-            column_img = img[py:py+ph, px:px+pw]
-            column_gray = gray[py:py+ph, px:px+pw]
+            # Proyección vertical en este bloque
+            v_projection = np.sum(block_region > self.whitespace_threshold, axis=0) / block_h * 100
             
-            # Subdividir
-            sub_zones = self._subdivide_zone(
-                column_img, column_gray, 
-                self.subdivisions, debug, output_folder, col_idx
-            )
+            # Detectar columnas (zonas con mucho blanco vertical)
+            whitespace_cols = v_projection > 60
             
-            # Aplicar padding y recortar
-            for (sx, sy, sw, sh) in sub_zones:
-                # Calcular padding basado en altura de la zona
-                padding_top = int(sh * self.padding_percent / 100)
-                padding_bottom = int(sh * self.padding_percent / 100)
-                
-                # Coordenadas globales con padding
-                global_x = px + sx
-                global_y = max(0, py + sy - padding_top)  # No salir de la imagen
-                global_h = min(h - global_y, sh + padding_top + padding_bottom)
-                
-                # Recortar con padding
-                crop = img[global_y:global_y+global_h, global_x:global_x+sw]
-                
-                # Guardar
-                out_path = os.path.join(output_folder, f"zone_{zone_counter:02d}.jpg")
-                cv2.imwrite(out_path, crop, [cv2.IMWRITE_JPEG_QUALITY, 95])
-                
-                all_zones.append({
-                    'id': zone_counter,
-                    'column': col_idx + 1,
-                    'x': global_x,
-                    'y': global_y,
-                    'width': sw,
-                    'height': global_h,
-                    'path': out_path,
-                    'padding_applied': padding_top + padding_bottom
-                })
-                zone_counter += 1
+            # Encontrar separadores verticales
+            columns = []
+            in_content = False
+            col_start = 0
             
-            print(f"      ✓ {len(sub_zones)} zonas creadas")
-        
-        print(f"\n✅ Total: {len(all_zones)} zonas listas")
-        
-        # Visualización final
-        if debug:
-            self._create_debug_visualization(img, all_zones, output_folder)
+            for i, is_white in enumerate(whitespace_cols):
+                if not is_white and not in_content:
+                    col_start = i
+                    in_content = True
+                elif is_white and in_content:
+                    col_width = i - col_start
+                    if col_width > w * (self.min_zone_width_percent / 100):
+                        columns.append((block_x + col_start, block_y, col_width, block_h))
+                    in_content = False
+            
+            # Última columna
+            if in_content:
+                col_width = block_w - col_start
+                if col_width > w * (self.min_zone_width_percent / 100):
+                    columns.append((block_x + col_start, block_y, col_width, block_h))
+            
+            # Si no hay columnas claras, usar el bloque completo
+            if len(columns) == 0:
+                all_zones.append((block_x, block_y, block_w, block_h))
+            else:
+                all_zones.extend(columns)
         
         return all_zones
     
-    def _preprocess_image(self, img):
-        """Preprocesamiento optimizado."""
-        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        pil_img = Image.fromarray(img_rgb)
-        
-        # Aplicar preset
-        if self.preprocessing_preset == 'aggressive':
-            pil_img = ImageEnhance.Contrast(pil_img).enhance(2.5)
-            pil_img = ImageEnhance.Color(pil_img).enhance(1.8)
-            pil_img = ImageEnhance.Sharpness(pil_img).enhance(2.0)
-            pil_img = ImageEnhance.Brightness(pil_img).enhance(1.2)
-            
-        elif self.preprocessing_preset == 'balanced':
-            pil_img = ImageEnhance.Contrast(pil_img).enhance(1.8)
-            pil_img = ImageEnhance.Color(pil_img).enhance(1.4)
-            pil_img = ImageEnhance.Sharpness(pil_img).enhance(1.5)
-            
-        elif self.preprocessing_preset == 'gentle':
-            pil_img = ImageEnhance.Contrast(pil_img).enhance(1.3)
-            pil_img = ImageEnhance.Color(pil_img).enhance(1.2)
-        
-        # Convertir a gris con CLAHE
-        enhanced = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
-        gray = cv2.cvtColor(enhanced, cv2.COLOR_BGR2GRAY)
-        
-        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-        gray = clahe.apply(gray)
-        gray = cv2.bilateralFilter(gray, 9, 75, 75)
-        
-        return gray
-    
-    def _detect_primary_divisions(self, img, gray, debug, output_folder):
-        """Detecta columnas principales usando proyección vertical."""
+    def _detect_hierarchical(self, img, output_folder, debug):
+        """
+        Método jerárquico original (columnas + subdivisiones).
+        """
         h, w = img.shape[:2]
+        print(f"\n🔍 Método: Jerárquico (columnas + subdivisiones)...")
         
-        # Proyección vertical (suma de píxeles oscuros por columna)
-        v_projection = np.sum(gray < 200, axis=0)
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         
-        # Suavizar proyección para eliminar ruido
+        # Mejorar con CLAHE
+        clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
+        enhanced = clahe.apply(gray)
+        
+        if debug:
+            cv2.imwrite(os.path.join(output_folder, "1_preprocessed.jpg"), enhanced)
+        
+        # Detectar columnas (proyección vertical)
+        v_projection = np.sum(enhanced < 200, axis=0)
         v_projection_smooth = np.convolve(v_projection, np.ones(w//50)//(w//50), mode='same')
-        
-        # Umbral adaptativo
         v_threshold = np.max(v_projection_smooth) * 0.12
         
-        if debug:
-            self._save_projection_plot(
-                v_projection_smooth, v_threshold, 
-                'vertical', output_folder,
-                "Detección de Columnas (Proyección Vertical)"
-            )
+        gaps_v = self._find_gaps(v_projection_smooth, v_threshold, min_gap_size=w//30)
+        x_splits = [0] + gaps_v + [w]
         
-        # Encontrar gaps (separadores entre columnas)
-        gaps = self._find_gaps(v_projection_smooth, v_threshold, min_gap_size=w//30)
+        if len(x_splits) == 2:
+            x_splits = [0, w//2, w]
         
-        # Crear divisiones
-        if self.primary_divisions == 'auto':
-            x_splits = [0] + gaps + [w]
-            
-            # Si no hay gaps, dividir en 2
-            if len(x_splits) == 2:
-                x_splits = [0, w//2, w]
-                print("   ⚠️  No se detectaron separadores, dividiendo en 2 columnas")
-            
-            # Limitar a máximo 4 columnas (heurística)
-            if len(x_splits) > 5:
-                # Tomar solo los gaps más pronunciados
-                gap_strengths = []
-                for gap in gaps:
-                    strength = abs(v_projection_smooth[gap] - v_threshold)
-                    gap_strengths.append((gap, strength))
-                gap_strengths.sort(key=lambda x: x[1], reverse=True)
-                top_gaps = sorted([g[0] for g in gap_strengths[:3]])
-                x_splits = [0] + top_gaps + [w]
-        else:
-            # División manual en N partes iguales
-            n = self.primary_divisions
-            x_splits = [int(w * i / n) for i in range(n + 1)]
-        
-        # Generar zonas (columnas completas de arriba a abajo)
-        primary_zones = []
+        # Crear columnas
+        columns = []
         for i in range(len(x_splits) - 1):
             x1, x2 = x_splits[i], x_splits[i + 1]
-            primary_zones.append((x1, 0, x2 - x1, h))
+            columns.append((x1, 0, x2 - x1, h))
         
-        return primary_zones
-    
-    def _subdivide_zone(self, region_img, region_gray, n_subdivisions, 
-                       debug, output_folder, col_idx):
-        """Subdivide una columna horizontalmente."""
-        h, w = region_img.shape[:2]
-        
-        # Proyección horizontal
-        h_projection = np.sum(region_gray < 200, axis=1)
-        
-        # Suavizar proyección
-        window = max(5, h//100)
-        h_projection_smooth = np.convolve(h_projection, np.ones(window)/window, mode='same')
-        
-        # Umbral más sensible para subdivisiones
-        h_threshold = np.max(h_projection_smooth) * 0.08
-        
-        if debug:
-            self._save_projection_plot(
-                h_projection_smooth, h_threshold,
-                f'horizontal_col{col_idx+1}', output_folder,
-                f"Subdivisiones Columna {col_idx+1} (Proyección Horizontal)",
-                orientation='horizontal'
-            )
-        
-        # Encontrar gaps horizontales
-        h_gaps = self._find_gaps(h_projection_smooth, h_threshold, min_gap_size=h//25)
-        
-        # Crear subdivisiones
-        y_splits = [0] + h_gaps + [h]
-        
-        # Ajustar al número deseado
-        if len(y_splits) - 1 > n_subdivisions:
-            # Tomar splits más espaciados
-            indices = np.linspace(0, len(y_splits) - 1, n_subdivisions + 1, dtype=int)
-            y_splits = [y_splits[i] for i in indices]
-        elif len(y_splits) - 1 < n_subdivisions:
-            # División uniforme si hay muy pocos gaps
-            y_splits = [int(h * i / n_subdivisions) for i in range(n_subdivisions + 1)]
-        
-        # Generar sub-zonas
-        sub_zones = []
-        for i in range(len(y_splits) - 1):
-            y1, y2 = y_splits[i], y_splits[i + 1]
+        # Subdividir cada columna horizontalmente
+        all_zones = []
+        for col_x, col_y, col_w, col_h in columns:
+            col_region = enhanced[col_y:col_y+col_h, col_x:col_x+col_w]
             
-            # Filtrar zonas muy pequeñas (menos del 5% de la altura)
-            if (y2 - y1) > h * 0.05:
-                sub_zones.append((0, y1, w, y2 - y1))
+            h_projection = np.sum(col_region < 200, axis=1)
+            h_projection_smooth = np.convolve(h_projection, np.ones(max(5, col_h//100))//max(5, col_h//100), mode='same')
+            h_threshold = np.max(h_projection_smooth) * 0.08
+            
+            gaps_h = self._find_gaps(h_projection_smooth, h_threshold, min_gap_size=col_h//25)
+            y_splits = [0] + gaps_h + [col_h]
+            
+            # Limitar subdivisiones
+            if len(y_splits) > 5:
+                indices = np.linspace(0, len(y_splits) - 1, 4, dtype=int)
+                y_splits = [y_splits[i] for i in indices]
+            
+            for j in range(len(y_splits) - 1):
+                y1, y2 = y_splits[j], y_splits[j + 1]
+                zone_h = y2 - y1
+                
+                if zone_h > h * (self.min_zone_height_percent / 100):
+                    all_zones.append((col_x, col_y + y1, col_w, zone_h))
         
-        return sub_zones
+        return all_zones
     
     def _find_gaps(self, projection, threshold, min_gap_size):
-        """Encuentra espacios vacíos (separadores)."""
+        """Encuentra espacios vacíos."""
         below_threshold = projection < threshold
         gaps = []
         in_gap = False
@@ -255,81 +302,97 @@ class HierarchicalFlyerDetector:
                 gap_start = i
                 in_gap = True
             elif not is_gap and in_gap:
-                gap_length = i - gap_start
-                if gap_length >= min_gap_size:
-                    # Tomar el punto medio del gap
+                if i - gap_start >= min_gap_size:
                     gaps.append((gap_start + i) // 2)
                 in_gap = False
         
         return gaps
     
-    def _save_projection_plot(self, projection, threshold, name, output_folder, 
-                             title, orientation='vertical'):
+    def _apply_padding_and_crop(self, img, zones, output_folder, debug):
+        """Aplica padding y guarda los recortes."""
+        h, w = img.shape[:2]
+        final_zones = []
+        
+        for i, (x, y, zone_w, zone_h) in enumerate(zones, 1):
+            # Calcular padding
+            padding_top = int(zone_h * self.padding_percent / 100)
+            padding_bottom = int(zone_h * self.padding_percent / 100)
+            padding_left = int(zone_w * self.padding_percent / 100)
+            padding_right = int(zone_w * self.padding_percent / 100)
+            
+            # Aplicar padding sin salir de la imagen
+            y_start = max(0, y - padding_top)
+            y_end = min(h, y + zone_h + padding_bottom)
+            x_start = max(0, x - padding_left)
+            x_end = min(w, x + zone_w + padding_right)
+            
+            # Recortar
+            crop = img[y_start:y_end, x_start:x_end]
+            
+            # Guardar
+            out_path = os.path.join(output_folder, f"zone_{i:02d}.jpg")
+            cv2.imwrite(out_path, crop, [cv2.IMWRITE_JPEG_QUALITY, 95])
+            
+            final_zones.append({
+                'id': i,
+                'x': x_start,
+                'y': y_start,
+                'width': x_end - x_start,
+                'height': y_end - y_start,
+                'path': out_path,
+                'original_bounds': (x, y, zone_w, zone_h)
+            })
+        
+        # Visualización
+        if debug:
+            self._create_debug_visualization(img, final_zones, output_folder)
+        
+        return final_zones
+    
+    def _save_projection_plot(self, projection, output_folder, title, threshold=None):
         """Guarda gráfica de proyección."""
         try:
             import matplotlib
             matplotlib.use('Agg')
             import matplotlib.pyplot as plt
             
-            plt.figure(figsize=(14, 5) if orientation == 'vertical' else (6, 10))
+            plt.figure(figsize=(15, 6))
+            plt.plot(projection, linewidth=2, color='#2E86AB')
             
-            if orientation == 'vertical':
-                plt.plot(projection, linewidth=2, color='#2E86AB')
+            if threshold:
                 plt.axhline(y=threshold, color='#A23B72', linestyle='--', 
-                           linewidth=2, label=f'Umbral ({threshold:.0f})')
-                plt.xlabel('Posición X (píxeles)', fontsize=11)
-                plt.ylabel('Intensidad de contenido', fontsize=11)
-            else:
-                plt.plot(projection, range(len(projection)), linewidth=2, color='#2E86AB')
-                plt.axvline(x=threshold, color='#A23B72', linestyle='--', 
-                           linewidth=2, label=f'Umbral ({threshold:.0f})')
-                plt.ylabel('Posición Y (píxeles)', fontsize=11)
-                plt.xlabel('Intensidad de contenido', fontsize=11)
-                plt.gca().invert_yaxis()
+                           linewidth=2, label=f'Umbral ({threshold}%)')
             
             plt.title(title, fontsize=13, fontweight='bold')
-            plt.legend(fontsize=10)
-            plt.grid(True, alpha=0.3, linestyle=':')
+            plt.xlabel('Posición (píxeles)', fontsize=11)
+            plt.ylabel('% Píxeles Blancos', fontsize=11)
+            plt.grid(True, alpha=0.3)
+            plt.legend()
             plt.tight_layout()
             
-            out_path = os.path.join(output_folder, f"1_projection_{name}.png")
-            plt.savefig(out_path, dpi=120, bbox_inches='tight')
+            plt.savefig(os.path.join(output_folder, "2_whitespace_projection.png"), 
+                       dpi=120, bbox_inches='tight')
             plt.close()
-            
         except ImportError:
-            pass  # Matplotlib no disponible
+            pass
     
     def _create_debug_visualization(self, img, zones, output_folder):
-        """Crea visualización final con todas las zonas marcadas."""
+        """Visualización final."""
         debug_img = img.copy()
         
-        # Colores por columna
-        colors = [
-            (255, 50, 50),   # Rojo
-            (50, 255, 50),   # Verde
-            (50, 50, 255),   # Azul
-            (255, 255, 50),  # Amarillo
-            (255, 50, 255),  # Magenta
-        ]
+        colors = [(255, 50, 50), (50, 255, 50), (50, 50, 255), 
+                 (255, 255, 50), (255, 50, 255), (50, 255, 255)]
         
         for zone in zones:
-            color = colors[(zone['column'] - 1) % len(colors)]
-            
-            # Dibujar rectángulo
+            color = colors[(zone['id'] - 1) % len(colors)]
             x, y = zone['x'], zone['y']
             w, h = zone['width'], zone['height']
-            cv2.rectangle(debug_img, (x, y), (x + w, y + h), color, 4)
             
-            # Etiqueta
-            label = f"Z{zone['id']}"
-            cv2.putText(debug_img, label, (x + 10, y + 35),
-                       cv2.FONT_HERSHEY_SIMPLEX, 1.2, color, 3)
-            
-            # Info de padding (esquina superior derecha de cada zona)
-            padding_info = f"+{zone['padding_applied']}px"
-            cv2.putText(debug_img, padding_info, (x + w - 100, y + 30),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+            cv2.rectangle(debug_img, (x, y), (x + w, y + h), color, 5)
+            cv2.putText(debug_img, f"Z{zone['id']}", (x + 15, y + 50),
+                       cv2.FONT_HERSHEY_SIMPLEX, 1.5, color, 4)
         
-        out_path = os.path.join(output_folder, "2_final_zones.jpg")
-        cv2.imwrite(out_path, debug_img, [cv2.IMWRITE_JPEG_QUALITY, 90])
-        print(f"\n📊 Visualización guardada: {out_path}")
+        cv2.imwrite(os.path.join(output_folder, "3_final_zones.jpg"), debug_img)
+        print(f"📊 Visualización guardada: 3_final_zones.jpg")
+
+
