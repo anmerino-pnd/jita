@@ -16,7 +16,7 @@ def find_project_root(start_path: Path, marker_file: str = "pyproject.toml") -> 
 BASE_DIR = find_project_root(Path(__file__))
 
 DATA = BASE_DIR / "datos"
-CASA_LEY_DATA = DATA / "casa_ley" / date.today().strftime("%B_%Y")
+CASA_LEY_DATA = DATA / "casa_ley" / "octubre_2025"
 WINDOWED_CASA_LEY = CASA_LEY_DATA / "windowed"
 
 VECTORS_DIR = BASE_DIR / "datos" / "vectorstores"
